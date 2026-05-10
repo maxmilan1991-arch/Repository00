@@ -30,6 +30,16 @@ cp ricerca.example.yml ricerca.yml          # edit to taste
 python -m immobiliare_export --config ricerca.yml
 ```
 
+> **Antibot bypass requires `playwright-stealth`.** `pip install -e .`
+> already pulls it in (it is listed in `pyproject.toml`). Without
+> stealth, immobiliare.it's Cloudflare/DataDome layer fingerprints
+> Playwright in *both* headless and headful modes and answers `403` to
+> every navigation. The fetcher applies `stealth_sync(page)` to each
+> new tab and uses a Chrome-130-on-Windows-10 UA + a 1920×1080 viewport
+> so the session looks like a real desktop browser. If the import
+> fails, the fetcher refuses to start with an explicit error pointing
+> at the missing dependency.
+
 The output is `./out/immobiliare_<YYYY-MM-DD>.xlsx`. Open it in Excel /
 LibreOffice / Numbers — every row has a clickable link back to the
 listing on immobiliare.it.
@@ -161,10 +171,13 @@ Run the tool periodically to receive a fresh `.xlsx` every day/week.
 
 ## Known limits of the source site
 
-* immobiliare.it is fronted by Cloudflare/DataDome anti-bot. Most pages
-  go through, but a CAPTCHA may pop up. Re-run with `--headful` to
-  solve it manually; cookies persist across runs in the Playwright
-  profile.
+* immobiliare.it is fronted by Cloudflare/DataDome anti-bot. Plain
+  Playwright — headless *or* headful — is fingerprinted on the first
+  request and gets a blanket `403`; the fetcher always loads
+  `playwright-stealth` to mask the detector signals (`navigator.webdriver`,
+  CDP traces, plugin shape, WebGL vendor, …). Even with stealth a
+  CAPTCHA may pop up occasionally — re-run with `--headful` to solve it
+  by hand; cookies persist in the Playwright profile across runs.
 * The `surface` field is sometimes a sum (e.g. terreno + costruito) or
   a range. The DB stores the raw string in `superficie_raw` and a
   best-effort numeric in `superficie_mq`. Treat the numeric as a
