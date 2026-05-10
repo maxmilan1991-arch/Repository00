@@ -102,7 +102,7 @@ class Fetcher:
         # Resolved lazily inside ``_start_browser`` so the rest of the
         # package keeps importing in environments without playwright-stealth
         # (e.g. CI running just the unit tests).
-        self._stealth_sync = None
+        self._stealth = None
 
     # --------------------------------------------------------------- lifecycle
     def __enter__(self) -> "Fetcher":
@@ -128,14 +128,14 @@ class Fetcher:
         # it, every navigation comes back 403. Loaded lazily so the
         # ImportError message is actionable.
         try:
-            from playwright_stealth import stealth_sync as _stealth_sync
+            from playwright_stealth import Stealth
         except ImportError as e:
             raise FetcherError(
                 "playwright-stealth is not installed. Install it with "
-                "`pip install playwright-stealth` (>=1.0). Without it the "
+                "`pip install 'playwright-stealth>=2.0'`. Without it the "
                 "site's antibot answers 403 to every request."
             ) from e
-        self._stealth_sync = _stealth_sync
+        self._stealth = Stealth()
 
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=self.headless)
@@ -228,12 +228,13 @@ class Fetcher:
         page = self._context.new_page()
         # Apply stealth *before* the first navigation: stealth's hooks must
         # be installed via Page.add_init_script, which only takes effect on
-        # subsequent goto() calls.
-        if self._stealth_sync is not None:
+        # subsequent goto() calls. ``apply_stealth_sync`` is the 2.x API
+        # (the 1.x ``stealth_sync(page)`` free function was removed).
+        if self._stealth is not None:
             try:
-                self._stealth_sync(page)
+                self._stealth.apply_stealth_sync(page)
             except Exception as e:  # pragma: no cover - defensive
-                logger.warning("stealth_sync failed (%s); continuing without it", e)
+                logger.warning("apply_stealth_sync failed (%s); continuing without it", e)
         try:
             response = page.goto(url, wait_until="domcontentloaded")
             status = response.status if response is not None else 0
