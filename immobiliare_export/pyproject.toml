@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "immobiliare-export"
+version = "0.1.0"
+description = "CLI tool to scrape immobiliare.it search results into a local SQLite archive and export them to a styled .xlsx report."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "immobiliare-export contributors" }
+]
+dependencies = [
+    "playwright>=1.40",
+    "pyyaml>=6.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+immobiliare-export = "immobiliare_export.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["immobiliare_export*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
