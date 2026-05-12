@@ -61,6 +61,13 @@ class AppConfig:
     headless: bool = True
     consecutive_known_to_stop: int = 25
     runs_missed_before_stale: int = 3
+    # Antibot fallback: connect to a real Chrome the user is running with
+    # ``--remote-debugging-port`` instead of letting Playwright launch its
+    # own bundled Chromium. DataDome on immobiliare.it fingerprints stock
+    # Playwright (even with playwright-stealth applied) and answers 403;
+    # piggy-backing on a real Chrome session sidesteps that entirely.
+    connect_to_existing_browser: bool = False
+    cdp_endpoint: str = "http://localhost:9222"
     searches: list[SearchConfig] = field(default_factory=list)
     raw_yaml: str = ""
 
@@ -125,6 +132,8 @@ def _build_config(data: dict[str, Any], *, raw_yaml: str) -> AppConfig:
         headless=bool(data.get("headless", True)),
         consecutive_known_to_stop=int(data.get("consecutive_known_to_stop", 25)),
         runs_missed_before_stale=int(data.get("runs_missed_before_stale", 3)),
+        connect_to_existing_browser=bool(data.get("connect_to_existing_browser", False)),
+        cdp_endpoint=str(data.get("cdp_endpoint", "http://localhost:9222")),
         searches=searches,
         raw_yaml=raw_yaml,
     )

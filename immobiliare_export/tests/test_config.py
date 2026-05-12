@@ -88,3 +88,21 @@ def test_invalid_numeric_options():
             "max_pages_per_search": 0,
             "searches": [{"nome": "A", "url": "https://a"}],
         })
+
+
+def test_cdp_options_default_off():
+    cfg = load_config_from_dict({
+        "searches": [{"nome": "A", "url": "https://a"}],
+    })
+    assert cfg.connect_to_existing_browser is False
+    assert cfg.cdp_endpoint == "http://localhost:9222"
+
+
+def test_cdp_options_can_be_enabled():
+    cfg = load_config_from_dict({
+        "connect_to_existing_browser": True,
+        "cdp_endpoint": "http://127.0.0.1:9333",
+        "searches": [{"nome": "A", "url": "https://a"}],
+    })
+    assert cfg.connect_to_existing_browser is True
+    assert cfg.cdp_endpoint == "http://127.0.0.1:9333"
