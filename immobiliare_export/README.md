@@ -30,15 +30,16 @@ cp ricerca.example.yml ricerca.yml          # edit to taste
 python -m immobiliare_export --config ricerca.yml
 ```
 
-> **Antibot bypass requires `playwright-stealth`.** `pip install -e .`
+> **Antibot bypass requires `playwright-stealth>=2.0`.** `pip install -e .`
 > already pulls it in (it is listed in `pyproject.toml`). Without
 > stealth, immobiliare.it's Cloudflare/DataDome layer fingerprints
 > Playwright in *both* headless and headful modes and answers `403` to
-> every navigation. The fetcher applies `stealth_sync(page)` to each
-> new tab and uses a Chrome-130-on-Windows-10 UA + a 1920×1080 viewport
-> so the session looks like a real desktop browser. If the import
-> fails, the fetcher refuses to start with an explicit error pointing
-> at the missing dependency.
+> every navigation. The fetcher calls `Stealth().apply_stealth_sync(page)`
+> on each new tab (the 2.x API; the 1.x free function `stealth_sync`
+> no longer exists) and uses a Chrome-130-on-Windows-10 UA + a 1920×1080
+> viewport so the session looks like a real desktop browser. If the
+> import fails, the fetcher refuses to start with an explicit error
+> pointing at the missing dependency.
 
 The output is `./out/immobiliare_<YYYY-MM-DD>.xlsx`. Open it in Excel /
 LibreOffice / Numbers — every row has a clickable link back to the
