@@ -26,6 +26,13 @@ headless: true
 consecutive_known_to_stop: 25     # full page of "already known" → stop
 runs_missed_before_stale: 3       # missed for N runs → status="non più disponibile"
 
+# Antibot fallback: drive a real Chrome over CDP instead of letting
+# Playwright launch its own bundled Chromium. Use this if you keep
+# getting 403 from immobiliare.it even with playwright-stealth on.
+# See README → "Modalità CDP / Chrome reale" for the exact steps.
+connect_to_existing_browser: false
+cdp_endpoint: http://localhost:9222
+
 searches:
   # Whole-city search
   - nome: "Milano - tutta la città"

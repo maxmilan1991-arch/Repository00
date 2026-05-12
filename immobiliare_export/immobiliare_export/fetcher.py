@@ -1,19 +1,28 @@
-"""HTML fetching with Playwright + stealth + retries + adaptive rate limit.
+"""HTML fetching with Playwright + retries + adaptive rate limit.
 
-immobiliare.it is fronted by Cloudflare/DataDome. ``requests`` from stdlib
-gets a 403 almost immediately. *Plain* Playwright (headless or headful)
-also fails: the antibot fingerprints the navigator (``webdriver`` flag,
-missing plugins, ``chrome.runtime`` shape, language list, WebGL vendor,
-CDP traces, etc.) and answers 403 to every request.
+immobiliare.it is fronted by Cloudflare/DataDome. The fetcher supports
+two modes:
 
-We therefore patch every newly created ``Page`` with
-``playwright-stealth`` *before the first navigation*. Stealth rewrites
-the JS surface so the page looks like a real Chrome session.
+* **Launch mode (default).** Playwright launches its own bundled
+  Chromium, creates a fresh context, and patches every new page with
+  ``playwright-stealth`` before the first navigation. Stealth rewrites
+  the JS surface (``navigator.webdriver``, plugins, ``chrome.runtime``,
+  WebGL vendor, …) so the page looks like a real Chrome session.
+  Sufficient for many DataDome deployments, but not always.
+
+* **CDP mode** (``connect_to_existing_browser: true``). DataDome can
+  still fingerprint a stealth-patched Playwright session — at that point
+  the only reliable workaround is to drive a *real* Chrome the user is
+  running themselves with ``--remote-debugging-port``. The fetcher
+  ``connect_over_cdp`` to that Chrome, reuses its first context and
+  first tab, and never closes them. No stealth is applied (the browser
+  is genuine) and no user-agent / viewport are forced (we inherit
+  whatever the user's Chrome reports). See the README for the launch
+  instructions.
 
 The fetcher has three responsibilities:
 
-1. own the Playwright lifecycle (browser, context, page) and apply
-   stealth on each new page;
+1. own the Playwright lifecycle (browser, context, page);
 2. retry transient HTTP errors with exponential backoff;
 3. adapt the per-page delay if the site responds with 429 / 403 (rate
    limiting) — double it for the next 5 pages, then return to normal.
@@ -79,15 +88,20 @@ class Fetcher:
         retry_backoff_sec: float = 5.0,
         request_timeout_ms: int = 30000,
         user_agent: str | None = None,
+        connect_to_existing_browser: bool = False,
+        cdp_endpoint: str = "http://localhost:9222",
     ) -> None:
         self.headless = headless
         self.base_delay = float(delay_between_pages_sec)
         self.max_attempts = int(max_attempts_per_page)
         self.retry_backoff = float(retry_backoff_sec)
         self.timeout_ms = int(request_timeout_ms)
+        self.connect_to_existing_browser = bool(connect_to_existing_browser)
+        self.cdp_endpoint = str(cdp_endpoint)
         # A current, *stable* Chrome on Windows 10 is the most common UA in
         # the wild, so it draws the least scrutiny from DataDome / Cloudflare.
         # Bump alongside playwright-stealth's bundled Chrome version.
+        # Ignored in CDP mode — we inherit the real Chrome's UA.
         self.user_agent = user_agent or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -101,8 +115,12 @@ class Fetcher:
         self._context = None
         # Resolved lazily inside ``_start_browser`` so the rest of the
         # package keeps importing in environments without playwright-stealth
-        # (e.g. CI running just the unit tests).
+        # (e.g. CI running just the unit tests). Always ``None`` in CDP
+        # mode — a real Chrome doesn't need stealth.
         self._stealth = None
+        # In CDP mode we reuse the user's first tab across every fetch
+        # instead of opening / closing a new page each time.
+        self._cdp_page = None
 
     # --------------------------------------------------------------- lifecycle
     def __enter__(self) -> "Fetcher":
@@ -124,20 +142,30 @@ class Fetcher:
                 "`pip install playwright` and run `playwright install chromium`."
             ) from e
 
-        # Stealth is required to defeat immobiliare.it's antibot. Without
-        # it, every navigation comes back 403. Loaded lazily so the
-        # ImportError message is actionable.
+        self._playwright = sync_playwright().start()
+
+        if self.connect_to_existing_browser:
+            self._start_cdp()
+        else:
+            self._start_launched()
+
+    def _start_launched(self) -> None:
+        """Launch a fresh Chromium and patch each new page with stealth."""
+        # Stealth is required to defeat immobiliare.it's antibot in launch
+        # mode. Without it, every navigation comes back 403. Loaded lazily
+        # so the ImportError message is actionable.
         try:
             from playwright_stealth import Stealth
         except ImportError as e:
             raise FetcherError(
                 "playwright-stealth is not installed. Install it with "
                 "`pip install 'playwright-stealth>=2.0'`. Without it the "
-                "site's antibot answers 403 to every request."
+                "site's antibot answers 403 to every request. As a stronger "
+                "fallback set ``connect_to_existing_browser: true`` in the "
+                "YAML config and drive your real Chrome via CDP."
             ) from e
         self._stealth = Stealth()
 
-        self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=self.headless)
         self._context = self._browser.new_context(
             user_agent=self.user_agent,
@@ -150,17 +178,67 @@ class Fetcher:
         # treat timeouts as retryable below.
         self._context.set_default_navigation_timeout(self.timeout_ms)
 
+    def _start_cdp(self) -> None:
+        """Attach to the user's already-running Chrome via CDP.
+
+        Expects Chrome to have been launched with
+        ``--remote-debugging-port=<port>``. We reuse the first existing
+        context (the user's profile) and the first existing tab, so the
+        scrape inherits the cookies / fingerprint of a genuine session.
+        No stealth patching, no UA/viewport overrides — anything we'd set
+        would only make us *look more synthetic* to DataDome.
+        """
+        try:
+            self._browser = self._playwright.chromium.connect_over_cdp(
+                self.cdp_endpoint
+            )
+        except Exception as e:
+            raise FetcherError(
+                f"could not connect to Chrome at {self.cdp_endpoint!r}: {e}. "
+                "Make sure Chrome is running with "
+                "``--remote-debugging-port=9222`` (see README, "
+                "'Modalità CDP / Chrome reale')."
+            ) from e
+
+        contexts = list(self._browser.contexts)
+        if not contexts:
+            # ``connect_over_cdp`` against a CDP endpoint that has no
+            # default context is unusual but possible — make one rather
+            # than crash, so the fetcher still works.
+            self._context = self._browser.new_context()
+        else:
+            self._context = contexts[0]
+        self._context.set_default_navigation_timeout(self.timeout_ms)
+
+        pages = list(self._context.pages)
+        if pages:
+            self._cdp_page = pages[0]
+        else:
+            self._cdp_page = self._context.new_page()
+        logger.info(
+            "connected to Chrome over CDP at %s (context=%d, pages=%d)",
+            self.cdp_endpoint, len(contexts), len(pages),
+        )
+
     def _stop_browser(self) -> None:
-        try:
-            if self._context:
-                self._context.close()
-        finally:
+        # In CDP mode we are guests in the user's Chrome — closing the
+        # context, the browser, or the tab would kill their session. We
+        # only release the Playwright handle.
+        if not self.connect_to_existing_browser:
+            try:
+                if self._context:
+                    self._context.close()
+            finally:
+                self._context = None
+            try:
+                if self._browser:
+                    self._browser.close()
+            finally:
+                self._browser = None
+        else:
             self._context = None
-        try:
-            if self._browser:
-                self._browser.close()
-        finally:
             self._browser = None
+            self._cdp_page = None
         try:
             if self._playwright:
                 self._playwright.stop()
@@ -225,11 +303,19 @@ class Fetcher:
     def _goto(self, url: str) -> tuple[str, int]:
         if not self._context:
             raise FetcherError("fetcher used outside its context manager")
+
+        if self._cdp_page is not None:
+            # CDP mode: reuse the user's first tab across every fetch.
+            # Do NOT close it on exit — it belongs to the user.
+            page = self._cdp_page
+            response = page.goto(url, wait_until="domcontentloaded")
+            status = response.status if response is not None else 0
+            return page.content(), status
+
+        # Launch mode: a fresh page per fetch, stealth-patched before the
+        # first navigation (stealth's hooks ride on Page.add_init_script,
+        # which only fires on subsequent goto() calls).
         page = self._context.new_page()
-        # Apply stealth *before* the first navigation: stealth's hooks must
-        # be installed via Page.add_init_script, which only takes effect on
-        # subsequent goto() calls. ``apply_stealth_sync`` is the 2.x API
-        # (the 1.x ``stealth_sync(page)`` free function was removed).
         if self._stealth is not None:
             try:
                 self._stealth.apply_stealth_sync(page)

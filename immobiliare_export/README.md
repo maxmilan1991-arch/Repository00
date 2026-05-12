@@ -41,9 +41,85 @@ python -m immobiliare_export --config ricerca.yml
 > import fails, the fetcher refuses to start with an explicit error
 > pointing at the missing dependency.
 
+> **If stealth still isn't enough**, DataDome can occasionally fingerprint
+> even a stealth-patched Playwright. The escape hatch is **CDP mode**:
+> the tool drives your own, already-running Chrome over the DevTools
+> protocol instead of launching its bundled Chromium. See
+> [Modalità CDP / Chrome reale](#modalità-cdp--chrome-reale) below.
+
 The output is `./out/immobiliare_<YYYY-MM-DD>.xlsx`. Open it in Excel /
 LibreOffice / Numbers — every row has a clickable link back to the
 listing on immobiliare.it.
+
+---
+
+## Modalità CDP / Chrome reale
+
+If you still get `403` even with stealth on (DataDome's heuristics
+evolve continuously), the most reliable workaround is to drive a
+**real Chrome you launched yourself** over the Chrome DevTools
+Protocol. The tool then attaches to your existing browser session,
+inherits its cookies / fingerprint, and never starts a Playwright
+Chromium of its own.
+
+**Steps:**
+
+1. **Close every Chrome window first** — Chrome refuses to enable
+   remote debugging if another instance is already using your default
+   profile.
+2. **Launch Chrome with `--remote-debugging-port=9222`** and a
+   dedicated user-data dir so it doesn't clobber your personal
+   profile. Pick whichever command matches your OS:
+
+   * **Windows (PowerShell or `cmd`):**
+     ```
+     "C:\Program Files\Google\Chrome\Application\chrome.exe" ^
+         --remote-debugging-port=9222 ^
+         --user-data-dir="C:\temp\playwright-chrome-profile"
+     ```
+   * **macOS:**
+     ```bash
+     /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+         --remote-debugging-port=9222 \
+         --user-data-dir="$HOME/.playwright-chrome-profile"
+     ```
+   * **Linux:**
+     ```bash
+     google-chrome \
+         --remote-debugging-port=9222 \
+         --user-data-dir="$HOME/.playwright-chrome-profile"
+     ```
+3. **Open immobiliare.it in that Chrome** and solve any CAPTCHA /
+   accept the cookie banner once, *by hand*. From now on DataDome
+   will see a real human session.
+4. **Enable CDP in `ricerca.yml`:**
+   ```yaml
+   connect_to_existing_browser: true
+   cdp_endpoint: http://localhost:9222   # default, override if you used a different port
+   ```
+5. **Run the tool as usual:**
+   ```bash
+   python -m immobiliare_export --config ricerca.yml
+   ```
+
+The fetcher reuses `browser.contexts[0]` and `context.pages[0]` — i.e.
+the *first tab* of your already-open Chrome. It navigates that tab
+through every results page; it doesn't open new ones, and it doesn't
+close them when the run finishes (it's your browser, not ours). The
+stealth patches and the Chrome-on-Windows UA / 1920×1080 viewport are
+skipped: applying them would only fight the genuine signals that
+your real Chrome already emits.
+
+Caveats:
+
+* While the run is going, that Chrome window will keep navigating
+  away to whatever URL the scraper is on. Use a dedicated user-data
+  dir (step 2) so it doesn't disrupt your normal browsing.
+* If you close the tab or Chrome itself during the run, the fetcher
+  errors out on the next navigation. Re-launch Chrome with the same
+  port and re-run.
+* CDP mode ignores `headless` / `--headful` — the browser visibility
+  is whatever you chose when you launched Chrome.
 
 ---
 

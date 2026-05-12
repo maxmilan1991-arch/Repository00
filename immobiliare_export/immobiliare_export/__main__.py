@@ -379,6 +379,8 @@ def _build_fetcher(cfg: AppConfig, args: argparse.Namespace):
     return Fetcher(
         headless=False if args.headful else cfg.headless,
         delay_between_pages_sec=cfg.delay_between_pages_sec,
+        connect_to_existing_browser=cfg.connect_to_existing_browser,
+        cdp_endpoint=cfg.cdp_endpoint,
     )
 
 
