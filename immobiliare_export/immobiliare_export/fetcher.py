@@ -1,13 +1,19 @@
-"""HTML fetching with Playwright + retries + adaptive rate limit.
+"""HTML fetching with Playwright + stealth + retries + adaptive rate limit.
 
 immobiliare.it is fronted by Cloudflare/DataDome. ``requests`` from stdlib
-gets a 403 almost immediately. Playwright in headless mode with a real
-Chromium build clears the challenge most of the time; if it doesn't, we
-fall back to opening the browser visibly so a human can solve a CAPTCHA.
+gets a 403 almost immediately. *Plain* Playwright (headless or headful)
+also fails: the antibot fingerprints the navigator (``webdriver`` flag,
+missing plugins, ``chrome.runtime`` shape, language list, WebGL vendor,
+CDP traces, etc.) and answers 403 to every request.
+
+We therefore patch every newly created ``Page`` with
+``playwright-stealth`` *before the first navigation*. Stealth rewrites
+the JS surface so the page looks like a real Chrome session.
 
 The fetcher has three responsibilities:
 
-1. own the Playwright lifecycle (browser, context, page);
+1. own the Playwright lifecycle (browser, context, page) and apply
+   stealth on each new page;
 2. retry transient HTTP errors with exponential backoff;
 3. adapt the per-page delay if the site responds with 429 / 403 (rate
    limiting) — double it for the next 5 pages, then return to normal.
@@ -79,10 +85,13 @@ class Fetcher:
         self.max_attempts = int(max_attempts_per_page)
         self.retry_backoff = float(retry_backoff_sec)
         self.timeout_ms = int(request_timeout_ms)
+        # A current, *stable* Chrome on Windows 10 is the most common UA in
+        # the wild, so it draws the least scrutiny from DataDome / Cloudflare.
+        # Bump alongside playwright-stealth's bundled Chrome version.
         self.user_agent = user_agent or (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "Chrome/130.0.0.0 Safari/537.36"
         )
 
         self._slowdown_remaining = 0
@@ -90,6 +99,10 @@ class Fetcher:
         self._playwright = None
         self._browser = None
         self._context = None
+        # Resolved lazily inside ``_start_browser`` so the rest of the
+        # package keeps importing in environments without playwright-stealth
+        # (e.g. CI running just the unit tests).
+        self._stealth = None
 
     # --------------------------------------------------------------- lifecycle
     def __enter__(self) -> "Fetcher":
@@ -111,12 +124,27 @@ class Fetcher:
                 "`pip install playwright` and run `playwright install chromium`."
             ) from e
 
+        # Stealth is required to defeat immobiliare.it's antibot. Without
+        # it, every navigation comes back 403. Loaded lazily so the
+        # ImportError message is actionable.
+        try:
+            from playwright_stealth import Stealth
+        except ImportError as e:
+            raise FetcherError(
+                "playwright-stealth is not installed. Install it with "
+                "`pip install 'playwright-stealth>=2.0'`. Without it the "
+                "site's antibot answers 403 to every request."
+            ) from e
+        self._stealth = Stealth()
+
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=self.headless)
         self._context = self._browser.new_context(
             user_agent=self.user_agent,
             locale="it-IT",
-            viewport={"width": 1366, "height": 800},
+            # Full-HD matches the most common desktop screen size and
+            # avoids the "small viewport" signal flagged by some antibots.
+            viewport={"width": 1920, "height": 1080},
         )
         # A blanket timeout is friendlier than per-call ones; we still
         # treat timeouts as retryable below.
@@ -198,6 +226,15 @@ class Fetcher:
         if not self._context:
             raise FetcherError("fetcher used outside its context manager")
         page = self._context.new_page()
+        # Apply stealth *before* the first navigation: stealth's hooks must
+        # be installed via Page.add_init_script, which only takes effect on
+        # subsequent goto() calls. ``apply_stealth_sync`` is the 2.x API
+        # (the 1.x ``stealth_sync(page)`` free function was removed).
+        if self._stealth is not None:
+            try:
+                self._stealth.apply_stealth_sync(page)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("apply_stealth_sync failed (%s); continuing without it", e)
         try:
             response = page.goto(url, wait_until="domcontentloaded")
             status = response.status if response is not None else 0
