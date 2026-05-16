@@ -121,7 +121,7 @@ def export_workbook(
 # Column layout shared between "Listing" and "Novità".
 _LISTING_HEADERS = [
     "#", "ID", "Provincia", "Comune", "Tipologia", "Titolo", "Prezzo (€)",
-    "Superficie", "€/m²", "Locali", "Bagni", "Stato",
+    "Superficie (m²)", "€/m²", "Locali", "Bagni", "Stato",
     "Trattativa privata?", "Asta?", "Indirizzo", "Lat", "Lng",
     "First seen", "Last seen", "Variazione prezzo", "Status",
     "Ricerca", "Link",
@@ -182,7 +182,11 @@ def _write_listing_row(ws, excel_row: int, row: sqlite3.Row, *, ordinal: int) ->
     values[_COL_IDX["Tipologia"]] = row["tipologia"] or ""
     values[_COL_IDX["Titolo"]] = row["titolo"] or ""
     values[_COL_IDX["Prezzo (€)"]] = prezzo
-    values[_COL_IDX["Superficie"]] = row["superficie_raw"] or ""
+    # Numeric integer so Excel can sort/filter/aggregate it. If the raw
+    # surface couldn't be parsed (e.g. "n.d.", missing field) ``surface_mq``
+    # is None, which openpyxl renders as an empty cell — preferable to
+    # writing the literal string "None" or echoing the raw text.
+    values[_COL_IDX["Superficie (m²)"]] = surface_mq
     # €/m² uses an Excel formula so the user can edit prices and see it
     # update. ``IFERROR`` swallows the case where surface is missing.
     price_cell = f"{get_column_letter(_COL['Prezzo (€)'])}{excel_row}"
@@ -212,6 +216,7 @@ def _write_listing_row(ws, excel_row: int, row: sqlite3.Row, *, ordinal: int) ->
 
     # Type-specific formatting + highlights.
     ws.cell(row=excel_row, column=_COL["Prezzo (€)"]).number_format = PRICE_FORMAT
+    ws.cell(row=excel_row, column=_COL["Superficie (m²)"]).number_format = "#,##0"
     ws.cell(row=excel_row, column=_COL["€/m²"]).number_format = PRICE_FORMAT
     ws.cell(row=excel_row, column=_COL["Link"]).font = LINK_FONT
 
@@ -232,7 +237,7 @@ def _finalize_listing_sheet(ws, n_data: int) -> None:
 
     widths = {
         "#": 5, "ID": 12, "Provincia": 10, "Comune": 18, "Tipologia": 16,
-        "Titolo": 50, "Prezzo (€)": 14, "Superficie": 12, "€/m²": 12,
+        "Titolo": 50, "Prezzo (€)": 14, "Superficie (m²)": 14, "€/m²": 12,
         "Locali": 8, "Bagni": 8, "Stato": 22, "Trattativa privata?": 10,
         "Asta?": 8, "Indirizzo": 30, "Lat": 10, "Lng": 10,
         "First seen": 18, "Last seen": 18, "Variazione prezzo": 18,

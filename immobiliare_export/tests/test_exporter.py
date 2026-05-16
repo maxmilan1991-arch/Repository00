@@ -80,7 +80,76 @@ def test_listing_sheet_has_expected_rows(tmp_path: Path, db_with_data):
     headers = [c.value for c in ws[1]]
     assert headers[0] == "#"
     assert "Prezzo (€)" in headers
+    assert "Superficie (m²)" in headers
     assert "Link" in headers
+
+
+def _find_col(ws, header_name: str) -> int:
+    headers = [c.value for c in ws[1]]
+    return headers.index(header_name) + 1
+
+
+def test_surface_column_is_numeric(tmp_path: Path, db_with_data):
+    """The "Superficie (m²)" column must contain integers, not strings,
+    so Excel can sort/filter the column numerically. Seed listings have
+    superficie_mq=120."""
+    out = tmp_path / "r.xlsx"
+    ctx = ExportContext(
+        config_yaml="",
+        run_started_at=datetime.utcnow(),
+        run_finished_at=datetime.utcnow(),
+        run_counters={"n_new": 0, "n_updated": 0, "n_unchanged": 0, "n_stale": 0},
+    )
+    export_workbook(db_with_data, out, ctx)
+
+    wb = load_workbook(out)
+    ws = wb["Listing"]
+    surf_col = _find_col(ws, "Superficie (m²)")
+    cell = ws.cell(row=2, column=surf_col)
+    assert cell.value == 120
+    assert isinstance(cell.value, int)
+    assert cell.number_format == "#,##0"
+
+
+def test_surface_column_blank_when_unparseable(tmp_path: Path):
+    """When superficie_mq is NULL (e.g. raw was 'n.d.'), the cell must
+    be empty, not the literal 'None' or the raw string."""
+    db = Database(tmp_path / "blank.db")
+    db.upsert_listing(_mk_listing(id=1, superficie_raw="n.d.", superficie_mq=None))
+    out = tmp_path / "r.xlsx"
+    ctx = ExportContext(
+        config_yaml="",
+        run_started_at=datetime.utcnow(),
+        run_finished_at=datetime.utcnow(),
+        run_counters={"n_new": 1, "n_updated": 0, "n_unchanged": 0, "n_stale": 0},
+    )
+    export_workbook(db, out, ctx)
+
+    wb = load_workbook(out)
+    ws = wb["Listing"]
+    surf_col = _find_col(ws, "Superficie (m²)")
+    assert ws.cell(row=2, column=surf_col).value is None
+    db.close()
+
+
+def test_novita_surface_column_is_numeric(tmp_path: Path, db_with_data):
+    """The Novità sheet reuses the Listing layout — same numeric rule."""
+    out = tmp_path / "r.xlsx"
+    ctx = ExportContext(
+        config_yaml="",
+        run_started_at=datetime(2023, 1, 1, 10, 0, 0),  # seed is 2024-01-01
+        run_finished_at=datetime(2023, 1, 1, 10, 30, 0),
+        run_counters={"n_new": 3, "n_updated": 0, "n_unchanged": 0, "n_stale": 0},
+    )
+    export_workbook(db_with_data, out, ctx)
+
+    wb = load_workbook(out)
+    ws = wb["Novità"]
+    surf_col = _find_col(ws, "Superficie (m²)")
+    cell = ws.cell(row=2, column=surf_col)
+    assert isinstance(cell.value, int)
+    assert cell.value == 120
+    assert cell.number_format == "#,##0"
 
 
 def test_novita_sheet_empty_message(tmp_path: Path, db_with_data):
