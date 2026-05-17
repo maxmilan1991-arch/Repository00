@@ -25,6 +25,7 @@ from .database import (
     UPDATE_PRICE,
     Database,
 )
+from .description_parser import parse_built_surface
 from .exporter import ExportContext, export_workbook
 from .parser import ParserError, parse_results_page
 
@@ -54,6 +55,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="don't write DB or xlsx, just print what would happen")
     p.add_argument("--search", default=None,
                    help="only run the search with the given name (debug)")
+    p.add_argument("--reparse-descriptions", action="store_true",
+                   help="don't scrape; re-run the description parser on every "
+                        "listing already in the DB and exit")
     p.add_argument("--headful", action="store_true",
                    help="open the browser visibly (useful for solving CAPTCHAs)")
     p.add_argument("--log-file", default=None,
@@ -170,6 +174,7 @@ def _scrape_search(
                     else:
                         n_unchanged += 1
                         page_unchanged += 1
+                    _store_built_surface(db, listing.id, listing.descrizione)
         else:
             for listing in page_data.listings:
                 seen_ids.add(listing.id)
@@ -236,6 +241,15 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(args.config)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.reparse_descriptions:
+        # Don't touch the network. Just re-run the parser over the
+        # existing DB and exit — no xlsx is emitted because no run
+        # actually happened.
+        db = Database(args.db)
+        _reparse_all_descriptions(db)
+        db.close()
+        return 0
 
     if args.search:
         only = cfg.search_by_name(args.search)
@@ -366,6 +380,52 @@ def main(argv: list[str] | None = None) -> int:
     state_mod.clear(checkpoint_path)
     db.close()
     return 0
+
+
+def _store_built_surface(db: Database, listing_id: int, description: str | None) -> None:
+    """Run the description parser and persist the result for one listing.
+
+    Failures are non-fatal: a malformed description should never abort
+    a scrape run. They're logged at DEBUG so the caller can investigate
+    if recall looks suspiciously low.
+    """
+    try:
+        result = parse_built_surface(description or "")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("description parser failed for listing %d: %s", listing_id, e)
+        return
+    db.set_built_surface(
+        listing_id,
+        totale_edificato_mq=result["totale_edificato_mq"],
+        componenti=result["componenti"],
+        note=result["note_parsing"],
+    )
+
+
+def _reparse_all_descriptions(db: Database) -> int:
+    """Re-run the parser over every listing already in the DB.
+
+    Returns the number of listings that ended up with a non-NULL
+    ``edificato_mq``. Useful for back-filling the columns on legacy
+    rows or after parser improvements.
+    """
+    rows = db.iter_listings_for_reparse()
+    n_hits = 0
+    for row in rows:
+        result = parse_built_surface(row["descrizione"] or "")
+        db.set_built_surface(
+            int(row["id"]),
+            totale_edificato_mq=result["totale_edificato_mq"],
+            componenti=result["componenti"],
+            note=result["note_parsing"],
+        )
+        if result["totale_edificato_mq"] is not None:
+            n_hits += 1
+    logger.info(
+        "reparse done: %d listings scanned, %d con superficie edificata",
+        len(rows), n_hits,
+    )
+    return n_hits
 
 
 def _build_fetcher(cfg: AppConfig, args: argparse.Namespace):

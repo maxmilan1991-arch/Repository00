@@ -51,7 +51,10 @@ CREATE TABLE IF NOT EXISTS listings (
     last_seen       TIMESTAMP,
     runs_missed     INTEGER NOT NULL DEFAULT 0,
     attivo          INTEGER NOT NULL DEFAULT 1,
-    raw_json        TEXT
+    raw_json        TEXT,
+    edificato_mq            INTEGER,
+    edificato_componenti    TEXT,
+    edificato_note          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS price_history (
@@ -321,6 +324,38 @@ class Database:
         )
         return UpsertResult(listing.id, UPDATE_PRICE, old_price, new_price)
 
+    def set_built_surface(
+        self,
+        listing_id: int,
+        *,
+        totale_edificato_mq: int | None,
+        componenti: list[dict] | None,
+        note: str,
+    ) -> None:
+        """Persist the description-parser estimate for one listing.
+
+        ``componenti`` is serialised as compact JSON so the audit sheet
+        can replay the raw match list without joining another table.
+        """
+        comp_json = json.dumps(componenti or [], ensure_ascii=False)
+        self.conn.execute(
+            """
+            UPDATE listings
+            SET edificato_mq = ?,
+                edificato_componenti = ?,
+                edificato_note = ?
+            WHERE id = ?
+            """,
+            (totale_edificato_mq, comp_json, note or "", listing_id),
+        )
+        self.conn.commit()
+
+    def iter_listings_for_reparse(self) -> Iterable[sqlite3.Row]:
+        """Yield every row that has at least a snippet to re-parse."""
+        return self.conn.execute(
+            "SELECT id, descrizione FROM listings WHERE descrizione IS NOT NULL"
+        ).fetchall()
+
     def reset_for_full_rescan(self) -> None:
         """Zero ``runs_missed`` and ``last_seen`` ahead of a full rescan.
 
@@ -476,9 +511,36 @@ class Database:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Run the idempotent schema creation script."""
+    """Run the idempotent schema creation script and any column migrations.
+
+    Fresh DBs get every column from ``SCHEMA_SQL``. Older DBs created
+    before a column existed are upgraded in place with ``ALTER TABLE
+    ADD COLUMN`` — SQLite has no ``IF NOT EXISTS`` for columns, so we
+    probe ``PRAGMA table_info`` first.
+    """
     conn.executescript(SCHEMA_SQL)
+    _migrate_add_columns_if_missing(
+        conn,
+        table="listings",
+        columns=[
+            ("edificato_mq", "INTEGER"),
+            ("edificato_componenti", "TEXT"),
+            ("edificato_note", "TEXT"),
+        ],
+    )
     conn.commit()
+
+
+def _migrate_add_columns_if_missing(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    columns: list[tuple[str, str]],
+) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, sql_type in columns:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
 
 
 def _now_iso() -> str:
