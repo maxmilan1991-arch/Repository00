@@ -16,6 +16,7 @@ spreadsheet manually and see numbers update.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass, field
@@ -109,6 +110,9 @@ def export_workbook(
     ws_cfg = wb.create_sheet("Configurazione")
     _build_config_sheet(ws_cfg, ctx)
 
+    ws_audit = wb.create_sheet("Audit parser")
+    _build_audit_parser_sheet(ws_audit, listings_rows)
+
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
@@ -118,10 +122,14 @@ def export_workbook(
 # ---------------------------------------------------------- "Listing" sheet
 
 
-# Column layout shared between "Listing" and "Novità".
+# Column layout shared between "Listing" and "Novità". The two
+# "Edificato …" columns sit right after the structured "Superficie (m²)"
+# so a reader scanning left-to-right sees structured vs. parsed surfaces
+# side by side and can spot the discrepancies that motivated the parser.
 _LISTING_HEADERS = [
     "#", "ID", "Provincia", "Comune", "Tipologia", "Titolo", "Prezzo (€)",
-    "Superficie (m²)", "€/m²", "Locali", "Bagni", "Stato",
+    "Superficie (m²)", "Edificato stimato (m²)", "Componenti riconosciute",
+    "€/m²", "Locali", "Bagni", "Stato",
     "Trattativa privata?", "Asta?", "Indirizzo", "Lat", "Lng",
     "First seen", "Last seen", "Variazione prezzo", "Status",
     "Ricerca", "Link",
@@ -187,6 +195,9 @@ def _write_listing_row(ws, excel_row: int, row: sqlite3.Row, *, ordinal: int) ->
     # is None, which openpyxl renders as an empty cell — preferable to
     # writing the literal string "None" or echoing the raw text.
     values[_COL_IDX["Superficie (m²)"]] = surface_mq
+    edificato_mq, componenti_summary = _read_built_surface(row)
+    values[_COL_IDX["Edificato stimato (m²)"]] = edificato_mq
+    values[_COL_IDX["Componenti riconosciute"]] = componenti_summary
     # €/m² uses an Excel formula so the user can edit prices and see it
     # update. ``IFERROR`` swallows the case where surface is missing.
     price_cell = f"{get_column_letter(_COL['Prezzo (€)'])}{excel_row}"
@@ -217,6 +228,7 @@ def _write_listing_row(ws, excel_row: int, row: sqlite3.Row, *, ordinal: int) ->
     # Type-specific formatting + highlights.
     ws.cell(row=excel_row, column=_COL["Prezzo (€)"]).number_format = PRICE_FORMAT
     ws.cell(row=excel_row, column=_COL["Superficie (m²)"]).number_format = "#,##0"
+    ws.cell(row=excel_row, column=_COL["Edificato stimato (m²)"]).number_format = "#,##0"
     ws.cell(row=excel_row, column=_COL["€/m²"]).number_format = PRICE_FORMAT
     ws.cell(row=excel_row, column=_COL["Link"]).font = LINK_FONT
 
@@ -237,7 +249,8 @@ def _finalize_listing_sheet(ws, n_data: int) -> None:
 
     widths = {
         "#": 5, "ID": 12, "Provincia": 10, "Comune": 18, "Tipologia": 16,
-        "Titolo": 50, "Prezzo (€)": 14, "Superficie (m²)": 14, "€/m²": 12,
+        "Titolo": 50, "Prezzo (€)": 14, "Superficie (m²)": 14,
+        "Edificato stimato (m²)": 14, "Componenti riconosciute": 36, "€/m²": 12,
         "Locali": 8, "Bagni": 8, "Stato": 22, "Trattativa privata?": 10,
         "Asta?": 8, "Indirizzo": 30, "Lat": 10, "Lng": 10,
         "First seen": 18, "Last seen": 18, "Variazione prezzo": 18,
@@ -503,6 +516,117 @@ def _build_config_sheet(ws, ctx: ExportContext) -> None:
     ws.column_dimensions["B"].width = 60
     ws.column_dimensions["C"].width = 20
     ws.column_dimensions["D"].width = 60
+
+
+# ----------------------------------------------- "Audit parser" sheet
+
+
+def _build_audit_parser_sheet(ws, listings_rows: list[sqlite3.Row]) -> None:
+    """One row per listing with at least one recognised component.
+
+    Built for human review: shows each match's category + m², the
+    original text fragment that triggered it, and any parser notes.
+    Empty if no listing in the DB has built-surface data (e.g. the
+    parser hasn't been run yet).
+    """
+    headers = [
+        "ID", "Titolo", "Edificato stimato (m²)",
+        "Componenti dettagliate", "Frammenti originali",
+        "Note parsing", "Link",
+    ]
+    _write_header(ws, headers)
+
+    enriched = [r for r in listings_rows if _row_has_built_surface(r)]
+    if not enriched:
+        ws["A2"] = "Nessun annuncio con superficie edificata riconosciuta"
+        ws["A2"].font = Font(name="Calibri", size=11, italic=True)
+        return
+
+    for i, row in enumerate(enriched, start=2):
+        listing_id = int(row["id"])
+        componenti = _decode_components(row)
+        ws.cell(row=i, column=1, value=listing_id)
+        ws.cell(row=i, column=2, value=row["titolo"] or "")
+        edif = ws.cell(row=i, column=3, value=row["edificato_mq"])
+        edif.number_format = "#,##0"
+        ws.cell(row=i, column=4, value=_format_components_detailed(componenti))
+        ws.cell(row=i, column=5, value=_format_fragments(componenti))
+        ws.cell(row=i, column=6, value=row["edificato_note"] or "")
+        link = ws.cell(
+            row=i, column=7,
+            value=f'=HYPERLINK("{listing_url(listing_id)}","Apri annuncio")',
+        )
+        link.font = LINK_FONT
+        for col in range(1, len(headers) + 1):
+            cell = ws.cell(row=i, column=col)
+            if cell.font.size is None:
+                cell.font = BODY_FONT
+
+    last_col = get_column_letter(len(headers))
+    ws.auto_filter.ref = f"A1:{last_col}{len(enriched) + 1}"
+    ws.freeze_panes = "A2"
+    widths = [12, 50, 14, 40, 60, 30, 16]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def _row_has_built_surface(row: sqlite3.Row) -> bool:
+    """Returns True if the row's built-surface columns are present and
+    populated. Tolerant of legacy DBs that lack the columns entirely."""
+    if "edificato_mq" not in row.keys():
+        return False
+    return row["edificato_mq"] is not None
+
+
+def _decode_components(row: sqlite3.Row) -> list[dict[str, Any]]:
+    raw = row["edificato_componenti"] if "edificato_componenti" in row.keys() else None
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _read_built_surface(row: sqlite3.Row) -> tuple[int | None, str]:
+    """Return (edificato_mq, human_readable_summary) for the listing row.
+
+    The summary collapses each component into ``"<tipo> <mq>"`` joined
+    by ``"; "``, then appends ``" → <total>"``. Returns ``(None, "")``
+    when the parser hasn't been run for this listing.
+    """
+    if not _row_has_built_surface(row):
+        return None, ""
+    componenti = _decode_components(row)
+    edificato_mq = row["edificato_mq"]
+    return edificato_mq, _format_components_summary(componenti, edificato_mq)
+
+
+def _format_components_summary(
+    componenti: list[dict[str, Any]], total: int | None,
+) -> str:
+    if not componenti:
+        return ""
+    parts = [f"{c.get('tipo', '?')} {c.get('mq', '?')}" for c in componenti]
+    head = "; ".join(parts)
+    if total is not None and len(componenti) > 1:
+        head = f"{head} → {total}"
+    return head
+
+
+def _format_components_detailed(componenti: list[dict[str, Any]]) -> str:
+    if not componenti:
+        return ""
+    return "\n".join(
+        f"• {c.get('tipo', '?')}: {c.get('mq', '?')} m²" for c in componenti
+    )
+
+
+def _format_fragments(componenti: list[dict[str, Any]]) -> str:
+    if not componenti:
+        return ""
+    return "\n".join(f"“{c.get('frammento', '')}”" for c in componenti)
 
 
 # ------------------------------------------------------------ helpers

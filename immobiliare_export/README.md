@@ -230,6 +230,89 @@ Suppose your search "Milano centro" matches 1,000 listings.
 
 ---
 
+## Estrazione superficie edificata (stima)
+
+The structured `superficie_mq` field on immobiliare.it is ambiguous for
+casali, rustici and bagli: it often reports the *land* surface rather
+than the *built* one. Anyone evaluating whether a compound can host N
+housing units needs the latter.
+
+The tool ships a deterministic parser (`description_parser.py`) that
+scans the free-text description, locates every `<number> mq` mention,
+and classifies each by its surrounding noun:
+
+* `fabbricato_principale` — casa, abitazione, villa, palazzo, masseria,
+  baglio, trullo, rustico, casale, casolare, podere, appartamento, …
+* `rudere` — rudere, casa diruta, fabbricato collabente, struttura da
+  ricostruire, vecchia casa colonica, …
+* `dependance` — dependance, dépendance, foresteria, guest house,
+  abitazione secondaria, …
+* `annesso` — stalla, scuderia, fienile, magazzino, ripostiglio, locale
+  tecnico, garage, autorimessa, capanno, …
+
+Surfaces attached to outdoor terms (`terrazzo`, `giardino`, `oliveto`,
+`vigneto`, `piscina`, `terreno`, …) and to potential rights
+(`edificabilità`, `cubatura concessa`, `volumetria edificabile`,
+`possibilità di edificare`) are *never* summed.
+
+Two columns appear in the **Listing** (and **Novità**) sheet of the
+generated `.xlsx`:
+
+* **Edificato stimato (m²)** — the sum, as a number formatted `#,##0`.
+* **Componenti riconosciute** — `"casa 220; dependance 80; annesso 40 → 340"`.
+
+And a dedicated **Audit parser** sheet lists, for each listing where
+the parser found anything:
+
+| ID | Titolo | Edificato stimato | Componenti dettagliate | Frammenti originali | Note parsing | Link |
+
+The "Frammenti originali" column shows the exact substring that
+triggered each match, so you can review the parser's decisions row by
+row.
+
+### Limits to be aware of
+
+* Recall: ~70–80% on real Italian ads. Listings phrased in
+  unconventional ways will silently come back blank — that's why the
+  Audit sheet exists.
+* False positives are possible too: ambiguous phrasings like
+  "magazzino di 30 mq" (storage room of an apartment vs. outbuilding
+  of a casale) end up in `annesso` either way. Treat the number as a
+  hint, not a measurement.
+* Best results require **full descriptions**. Search-results snippets
+  are short and frequently lack the structure the parser looks for.
+  Set `fetch_full_description: true` in the YAML to fetch the full
+  description from each detail page (when that toggle is wired up).
+* The parser is regex-based and runs offline: ~170 ms for 1,000
+  listings on a stock laptop. No LLM, no network call.
+
+### Re-running on existing data
+
+After installing a new parser version, back-fill the columns on every
+listing already in the DB without re-scraping:
+
+```bash
+python -m immobiliare_export --config ricerca.yml --reparse-descriptions
+```
+
+The flag short-circuits the scrape entirely; no `.xlsx` is produced
+because no run actually happened.
+
+### Validating manually
+
+1. Open the produced `.xlsx`.
+2. Go to the **Audit parser** sheet.
+3. Sort by *Edificato stimato* descending.
+4. For each row, eyeball the *Componenti dettagliate* + *Frammenti
+   originali* against your gut feeling. Click the *Link* to open the
+   listing if you want to double-check the original description.
+
+If you spot a systematic miss (e.g. a synonym we don't recognise), add
+the keyword to `CATEGORIES` in `description_parser.py` and re-run with
+`--reparse-descriptions`.
+
+---
+
 ## Scheduling
 
 Run the tool periodically to receive a fresh `.xlsx` every day/week.

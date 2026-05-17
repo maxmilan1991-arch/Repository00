@@ -59,7 +59,7 @@ def test_export_creates_xlsx_with_all_sheets(tmp_path: Path, db_with_data):
     wb = load_workbook(out)
     assert wb.sheetnames == [
         "Listing", "Novità", "Variazioni di prezzo",
-        "Riepilogo", "Run history", "Configurazione",
+        "Riepilogo", "Run history", "Configurazione", "Audit parser",
     ]
 
 
