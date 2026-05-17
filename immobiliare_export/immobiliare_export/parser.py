@@ -148,3 +148,51 @@ def parse_results_page(
         listings=listings,
         raw_results=raw_results,
     )
+
+
+def extract_full_description(html: str) -> str | None:
+    """Pull the full description text from a listing detail page.
+
+    The index page (``parse_results_page``) carries only a short
+    teaser. The detail page (``immobiliare.it/annunci/<id>/``) ships
+    the full free-text description inside its ``__NEXT_DATA__``. The
+    typical path is
+
+        props.pageProps.dehydratedState.queries[*].state.data
+            .detail.realEstate.properties[*].description
+
+    but the site occasionally serves a flatter shape (no ``detail``
+    wrapper), so we probe both. Returns ``None`` — never raises — when
+    the description can't be found; the caller falls back to the
+    snippet captured from the index page.
+    """
+    try:
+        nd = extract_next_data(html)
+    except ParserError:
+        return None
+    try:
+        queries = nd["props"]["pageProps"]["dehydratedState"]["queries"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(queries, list):
+        return None
+
+    for q in queries:
+        data = (q or {}).get("state", {}).get("data")
+        if not isinstance(data, dict):
+            continue
+        # Two shapes seen in the wild: data.detail.realEstate.properties
+        # and data.realEstate.properties (no ``detail`` wrapper).
+        for candidate in (data.get("detail"), data):
+            if not isinstance(candidate, dict):
+                continue
+            real_estate = candidate.get("realEstate")
+            if not isinstance(real_estate, dict):
+                continue
+            for prop in real_estate.get("properties") or []:
+                if not isinstance(prop, dict):
+                    continue
+                desc = prop.get("description") or prop.get("descrizione")
+                if isinstance(desc, str) and desc.strip():
+                    return desc.strip()
+    return None

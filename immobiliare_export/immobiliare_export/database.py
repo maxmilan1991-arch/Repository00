@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS listings (
     raw_json        TEXT,
     edificato_mq            INTEGER,
     edificato_componenti    TEXT,
-    edificato_note          TEXT
+    edificato_note          TEXT,
+    description_full        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS price_history (
@@ -350,11 +351,34 @@ class Database:
         )
         self.conn.commit()
 
-    def iter_listings_for_reparse(self) -> Iterable[sqlite3.Row]:
-        """Yield every row that has at least a snippet to re-parse."""
-        return self.conn.execute(
-            "SELECT id, descrizione FROM listings WHERE descrizione IS NOT NULL"
-        ).fetchall()
+    def set_description_full(self, listing_id: int, description_full: str) -> None:
+        """Persist the full free-text description fetched from a detail page.
+
+        Kept in a separate column from the index-page snippet so the
+        original short text isn't lost — handy when a future parser
+        improvement wants to revisit either version.
+        """
+        self.conn.execute(
+            "UPDATE listings SET description_full = ? WHERE id = ?",
+            (description_full, listing_id),
+        )
+        self.conn.commit()
+
+    def iter_listings_for_reparse(self) -> list[sqlite3.Row]:
+        """Yield every row that has at least some description text.
+
+        Prefers ``description_full`` (full detail-page text) over
+        ``descrizione`` (index-page snippet) since the full text is
+        what the description parser actually wants to chew on.
+        """
+        return list(
+            self.conn.execute(
+                "SELECT id, "
+                "COALESCE(description_full, descrizione) AS descrizione "
+                "FROM listings "
+                "WHERE description_full IS NOT NULL OR descrizione IS NOT NULL"
+            ).fetchall()
+        )
 
     def reset_for_full_rescan(self) -> None:
         """Zero ``runs_missed`` and ``last_seen`` ahead of a full rescan.
@@ -526,6 +550,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             ("edificato_mq", "INTEGER"),
             ("edificato_componenti", "TEXT"),
             ("edificato_note", "TEXT"),
+            ("description_full", "TEXT"),
         ],
     )
     conn.commit()

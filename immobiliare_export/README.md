@@ -157,6 +157,8 @@ Common URL shapes you can paste:
 | `--since`        | (last run start)                        | Mark as "novità" anything with `first_seen >= YYYY-MM-DD`.|
 | `--dry-run`      | off                                     | Don't write DB or xlsx; print what would happen.          |
 | `--search`       | (all)                                   | Run only the search with the given `nome`.                |
+| `--reparse-descriptions` | off                             | Don't scrape; re-run the surface parser on every DB row and exit. |
+| `--refetch-descriptions` | off                             | Don't scrape index pages; open the detail page of every DB row, refresh `description_full`, re-run the surface parser. |
 | `--headful`      | off                                     | Open the browser visibly (use for CAPTCHAs).              |
 | `--log-file`     | none                                    | Append logs to a file in addition to stderr.              |
 | `--verbose / -v` | off                                     | DEBUG-level logging.                                      |
@@ -279,24 +281,50 @@ row.
   "magazzino di 30 mq" (storage room of an apartment vs. outbuilding
   of a casale) end up in `annesso` either way. Treat the number as a
   hint, not a measurement.
-* Best results require **full descriptions**. Search-results snippets
-  are short and frequently lack the structure the parser looks for.
-  Set `fetch_full_description: true` in the YAML to fetch the full
-  description from each detail page (when that toggle is wired up).
+* Best results require **full descriptions** — set
+  `fetch_full_description: true` in `ricerca.yml`. With that flag the
+  scraper opens the detail page of every listing it finds, parses
+  `__NEXT_DATA__` for the long-form text, and saves it to a new
+  `description_full` column. The snippet from the index page is kept
+  too, in `descrizione`, so nothing is lost. Without the flag the
+  parser can only see the snippet, and recall drops sharply.
 * The parser is regex-based and runs offline: ~170 ms for 1,000
   listings on a stock laptop. No LLM, no network call.
+
+### Timing trade-off
+
+With `fetch_full_description: true`, the throughput goes from
+**~30–40 listings/min** (index-only) to **~3–5 listings/min** because
+every listing now triggers an extra `goto` plus the
+`delay_between_pages_sec` cool-down. For a 900-listing search expect
+roughly 3–5 hours of wall time on the first run; subsequent
+incremental runs only fetch the *new* listings.
 
 ### Re-running on existing data
 
 After installing a new parser version, back-fill the columns on every
-listing already in the DB without re-scraping:
+listing already in the DB **without re-scraping anything**:
 
 ```bash
 python -m immobiliare_export --config ricerca.yml --reparse-descriptions
 ```
 
-The flag short-circuits the scrape entirely; no `.xlsx` is produced
-because no run actually happened.
+The flag short-circuits the scrape entirely; no `.xlsx` is produced.
+It re-runs the parser on whatever description text the DB already has
+(prefers `description_full` when present, falls back to the snippet).
+
+If your DB was populated by fast runs (no `fetch_full_description`)
+and you now want to **enrich it with full descriptions** without
+re-scraping the index pages, use the dedicated refetch flag:
+
+```bash
+python -m immobiliare_export --config ricerca.yml --refetch-descriptions
+```
+
+It iterates over every existing listing, opens its detail page,
+saves the full description and re-runs the surface parser on it.
+Respects `delay_between_pages_sec` between requests, so for an 891-row
+DB expect ~30–50 minutes at `delay_between_pages_sec: 2`.
 
 ### Validating manually
 
