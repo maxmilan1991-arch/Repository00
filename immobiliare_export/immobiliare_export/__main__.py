@@ -27,7 +27,7 @@ from .database import (
 )
 from .description_parser import parse_built_surface
 from .exporter import ExportContext, export_workbook
-from .parser import ParserError, parse_results_page
+from .parser import ParserError, extract_full_description, parse_results_page
 
 logger = logging.getLogger("immobiliare_export")
 
@@ -58,6 +58,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--reparse-descriptions", action="store_true",
                    help="don't scrape; re-run the description parser on every "
                         "listing already in the DB and exit")
+    p.add_argument("--refetch-descriptions", action="store_true",
+                   help="don't scrape the index pages; open the detail page "
+                        "of every listing already in the DB, save the full "
+                        "description, and re-run the surface parser. "
+                        "Respects delay_between_pages_sec between requests.")
     p.add_argument("--headful", action="store_true",
                    help="open the browser visibly (useful for solving CAPTCHAs)")
     p.add_argument("--log-file", default=None,
@@ -174,7 +179,19 @@ def _scrape_search(
                     else:
                         n_unchanged += 1
                         page_unchanged += 1
+                    # Snippet-level parse first; the per-listing detail
+                    # fetch below will overwrite this with a better one
+                    # when ``fetch_full_description`` is enabled.
                     _store_built_surface(db, listing.id, listing.descrizione)
+
+            if cfg.fetch_full_description:
+                _fetch_details_for_page(
+                    fetcher=fetcher,
+                    db=db,
+                    search_nome=search.nome,
+                    page_idx=page,
+                    listings=page_data.listings,
+                )
         else:
             for listing in page_data.listings:
                 seen_ids.add(listing.id)
@@ -249,6 +266,20 @@ def main(argv: list[str] | None = None) -> int:
         db = Database(args.db)
         _reparse_all_descriptions(db)
         db.close()
+        return 0
+
+    if args.refetch_descriptions:
+        # Don't scrape the index pages. Open every existing listing's
+        # detail page, refresh the full description, re-parse built
+        # surface. Browser is launched (or attached via CDP) just like
+        # a normal run because we need real HTTP traffic.
+        db = Database(args.db)
+        fetcher_cm = _build_fetcher(cfg, args)
+        try:
+            with fetcher_cm as fetcher:
+                _refetch_all_descriptions(fetcher, db)
+        finally:
+            db.close()
         return 0
 
     if args.search:
@@ -400,6 +431,113 @@ def _store_built_surface(db: Database, listing_id: int, description: str | None)
         componenti=result["componenti"],
         note=result["note_parsing"],
     )
+
+
+def _fetch_details_for_page(
+    *,
+    fetcher,
+    db: Database,
+    search_nome: str,
+    page_idx: int,
+    listings,
+) -> None:
+    """For each listing on the page, open its detail page, save the full
+    description and re-run the built-surface parser on it.
+
+    Failures (network, 404, antibot 403) are logged at WARNING and the
+    listing is skipped — the snippet-level description / parse done in
+    the index pass remains as a fallback. The fetcher's
+    ``sleep_between_pages`` is honoured between detail requests, so the
+    site's adaptive rate limit applies to detail pages too.
+    """
+    from .models import listing_url
+
+    n = len(listings)
+    for i, listing in enumerate(listings, start=1):
+        detail_url = listing_url(listing.id)
+        logger.info(
+            "ricerca %r, pag %d, scheda %d/%d: GET %s",
+            search_nome, page_idx, i, n, detail_url,
+        )
+        try:
+            res = fetcher.fetch(detail_url)
+        except Exception as e:
+            logger.warning(
+                "scheda %d non fetchabile (%s) — skip, resto sullo snippet",
+                listing.id, e,
+            )
+            continue
+        try:
+            full_desc = extract_full_description(res.html)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "parsing scheda %d fallito (%s) — skip", listing.id, e,
+            )
+            continue
+        if not full_desc:
+            logger.debug("scheda %d senza descrizione full — skip", listing.id)
+            continue
+        db.set_description_full(listing.id, full_desc)
+        _store_built_surface(db, listing.id, full_desc)
+        # Rate-limit between detail pages too, not just between index pages.
+        fetcher.sleep_between_pages()
+
+
+def _refetch_all_descriptions(fetcher, db: Database) -> tuple[int, int]:
+    """For every listing in the DB, open the detail page and refresh
+    description_full + edificato_*.
+
+    Returns ``(n_updated, n_with_built_surface)``. Used by the
+    ``--refetch-descriptions`` CLI flag and unit-tested with a fake
+    fetcher. Respects ``Fetcher.sleep_between_pages`` between requests.
+    """
+    from .models import listing_url
+
+    rows = db.iter_listings_for_reparse()
+    total = len(rows)
+    n_updated = 0
+    n_with_built_surface = 0
+    for i, row in enumerate(rows, start=1):
+        listing_id = int(row["id"])
+        detail_url = listing_url(listing_id)
+        try:
+            res = fetcher.fetch(detail_url)
+        except Exception as e:
+            logger.warning(
+                "refetch scheda %d/%d (id=%d) fallita (%s) — skip",
+                i, total, listing_id, e,
+            )
+            continue
+        full_desc = extract_full_description(res.html)
+        if not full_desc:
+            logger.debug(
+                "refetch %d/%d (id=%d): nessuna descrizione full — skip",
+                i, total, listing_id,
+            )
+            fetcher.sleep_between_pages()
+            continue
+        db.set_description_full(listing_id, full_desc)
+        result = parse_built_surface(full_desc)
+        db.set_built_surface(
+            listing_id,
+            totale_edificato_mq=result["totale_edificato_mq"],
+            componenti=result["componenti"],
+            note=result["note_parsing"],
+        )
+        n_updated += 1
+        if result["totale_edificato_mq"] is not None:
+            n_with_built_surface += 1
+        logger.info(
+            "refetch description %d/%d (id=%d): +%d parsed",
+            i, total, listing_id, n_with_built_surface,
+        )
+        fetcher.sleep_between_pages()
+    logger.info(
+        "refetch done: %d descrizioni aggiornate, %d con superficie "
+        "edificata identificata",
+        n_updated, n_with_built_surface,
+    )
+    return n_updated, n_with_built_surface
 
 
 def _reparse_all_descriptions(db: Database) -> int:
